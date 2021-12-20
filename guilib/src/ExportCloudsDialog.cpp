@@ -233,6 +233,7 @@ ExportCloudsDialog::ExportCloudsDialog(QWidget *parent) :
 	connect(_ui->checkBox_multiband, SIGNAL(stateChanged(int)), this, SIGNAL(configChanged()));
 	connect(_ui->checkBox_multiband, SIGNAL(stateChanged(int)), this, SLOT(updateReconstructionFlavor()));
 	connect(_ui->spinBox_multiband_downscale, SIGNAL(valueChanged(int)), this, SIGNAL(configChanged()));
+	connect(_ui->lineEdit_multiband_nbcontrib, SIGNAL(textChanged(const QString &)), this, SIGNAL(configChanged()));
 	connect(_ui->comboBox_multiband_unwrap, SIGNAL(currentIndexChanged(int)), this, SIGNAL(configChanged()));
 	connect(_ui->checkBox_multiband_fillholes, SIGNAL(stateChanged(int)), this, SIGNAL(configChanged()));
 	connect(_ui->spinBox_multiband_padding, SIGNAL(valueChanged(int)), this, SIGNAL(configChanged()));
@@ -450,6 +451,7 @@ void ExportCloudsDialog::saveSettings(QSettings & settings, const QString & grou
 	settings.setValue("mesh_textureBlendingDecimation", _ui->comboBox_blendingDecimation->currentIndex());
 	settings.setValue("mesh_textureMultiband", _ui->checkBox_multiband->isChecked());
 	settings.setValue("mesh_textureMultibandDownScale", _ui->spinBox_multiband_downscale->value());
+	settings.setValue("mesh_textureMultibandNbContrib", _ui->lineEdit_multiband_nbcontrib->text());
 	settings.setValue("mesh_textureMultibandUnwrap", _ui->comboBox_multiband_unwrap->currentIndex());
 	settings.setValue("mesh_textureMultibandFillHoles", _ui->checkBox_multiband_fillholes->isChecked());
 	settings.setValue("mesh_textureMultibandPadding", _ui->spinBox_multiband_padding->value());
@@ -624,6 +626,7 @@ void ExportCloudsDialog::loadSettings(QSettings & settings, const QString & grou
 	_ui->comboBox_blendingDecimation->setCurrentIndex(settings.value("mesh_textureBlendingDecimation", _ui->comboBox_blendingDecimation->currentIndex()).toInt());
 	_ui->checkBox_multiband->setChecked(settings.value("mesh_textureMultiband", _ui->checkBox_multiband->isChecked()).toBool());
 	_ui->spinBox_multiband_downscale->setValue(settings.value("mesh_textureMultibandDownScale", _ui->spinBox_multiband_downscale->value()).toInt());
+	_ui->lineEdit_multiband_nbcontrib->setText(settings.value("mesh_textureMultibandNbContrib", _ui->lineEdit_multiband_nbcontrib->text()).toString());
 	_ui->comboBox_multiband_unwrap->setCurrentIndex(settings.value("mesh_textureMultibandUnwrap", _ui->comboBox_multiband_unwrap->currentIndex()).toInt());
 	_ui->checkBox_multiband_fillholes->setChecked(settings.value("mesh_textureMultibandFillHoles", _ui->checkBox_multiband_fillholes->isChecked()).toBool());
 	_ui->spinBox_multiband_padding->setValue(settings.value("mesh_textureMultibandPadding", _ui->spinBox_multiband_padding->value()).toInt());
@@ -789,6 +792,7 @@ void ExportCloudsDialog::restoreDefaults()
 	_ui->comboBox_blendingDecimation->setCurrentIndex(0);
 	_ui->checkBox_multiband->setChecked(false);
 	_ui->spinBox_multiband_downscale->setValue(2);
+	_ui->lineEdit_multiband_nbcontrib->setText("1 5 10 0");
 	_ui->comboBox_multiband_unwrap->setCurrentIndex(0);
 	_ui->checkBox_multiband_fillholes->setChecked(false);
 	_ui->spinBox_multiband_padding->setValue(5);
@@ -2714,7 +2718,6 @@ bool ExportCloudsDialog::getExportedClouds(
 
 				// color the cloud
 				UASSERT(pointToPixel.empty() || pointToPixel.size() == assembledCloud->size());
-				QMap<int, cv::Mat> cachedImages;
 				pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr assembledCloudValidPoints;
 				if(!_ui->checkBox_camProjKeepPointsNotSeenByCameras->isChecked())
 				{
@@ -2726,67 +2729,84 @@ bool ExportCloudsDialog::getExportedClouds(
 				{
 					textureVertexToPixels.resize(assembledCloud->size());
 				}
-				int oi=0;
-				for(size_t i=0; i<pointToPixel.size(); ++i)
+
+				if(_ui->checkBox_camProjRecolorPoints->isChecked())
 				{
-					pcl::PointXYZRGBNormal & pt = assembledCloud->at(i);
-					if(_ui->checkBox_camProjRecolorPoints->isChecked() && !_ui->checkBox_fromDepth->isChecked())
+					int imagesDone = 1;
+					for(std::map<int, rtabmap::Transform>::iterator iter=cameraPoses.begin(); iter!=cameraPoses.end(); ++iter)
 					{
-						pt.r = 255;
-						pt.g = 0;
-						pt.b = 0;
-						pt.a = 255;
-					}
-					int nodeID = pointToPixel[i].first.first;
-					int cameraIndex = pointToPixel[i].first.second;
-					if(nodeID>0 && cameraIndex>=0)
-					{
-						if(_ui->checkBox_camProjRecolorPoints->isChecked())
+						int nodeID = iter->first;
+
+						cv::Mat image;
+						if(cachedSignatures.contains(nodeID) && !cachedSignatures.value(nodeID).sensorData().imageCompressed().empty())
 						{
-							cv::Mat image;
-							if(cachedImages.contains(nodeID))
+							cachedSignatures.value(nodeID).sensorData().uncompressDataConst(&image, 0);
+						}
+						else if(_dbDriver)
+						{
+							SensorData data;
+							_dbDriver->getNodeData(nodeID, data, true, false, false, false);
+							data.uncompressDataConst(&image, 0);
+						}
+						if(!image.empty())
+						{
+							UASSERT(cameraModels.find(nodeID) != cameraModels.end());
+							int modelsSize = cameraModels.at(nodeID).size();
+							for(size_t i=0; i<pointToPixel.size(); ++i)
 							{
-								image = cachedImages.value(nodeID);
-							}
-							else if(cachedSignatures.contains(nodeID) && !cachedSignatures.value(nodeID).sensorData().imageCompressed().empty())
-							{
-								cachedSignatures.value(nodeID).sensorData().uncompressDataConst(&image, 0);
-								cachedImages.insert(nodeID, image);
-							}
-							else if(_dbDriver)
-							{
-								SensorData data;
-								_dbDriver->getNodeData(nodeID, data, true, false, false, false);
-								data.uncompressDataConst(&image, 0);
-								cachedImages.insert(nodeID, image);
-							}
-
-							if(!image.empty())
-							{
-								int subImageWidth = image.cols / cameraModels.at(nodeID).size();
-								image = image(cv::Range::all(), cv::Range(cameraIndex*subImageWidth, (cameraIndex+1)*subImageWidth));
-
-
-								int x = pointToPixel[i].second.x * (float)image.cols;
-								int y = pointToPixel[i].second.y * (float)image.rows;
-								UASSERT(x>=0 && x<image.cols);
-								UASSERT(y>=0 && y<image.rows);
-
-								if(image.type()==CV_8UC3)
+								int cameraIndex = pointToPixel[i].first.second;
+								if(nodeID == pointToPixel[i].first.first && cameraIndex>=0)
 								{
-									cv::Vec3b bgr = image.at<cv::Vec3b>(y, x);
-									pt.b = bgr[0];
-									pt.g = bgr[1];
-									pt.r = bgr[2];
-								}
-								else
-								{
-									UASSERT(image.type()==CV_8UC1);
-									pt.r = pt.g = pt.b = image.at<unsigned char>(pointToPixel[i].second.y * image.rows, pointToPixel[i].second.x * image.cols);
+									pcl::PointXYZRGBNormal & pt = assembledCloud->at(i);
+
+									int subImageWidth = image.cols / modelsSize;
+									cv::Mat subImage = image(cv::Range::all(), cv::Range(cameraIndex*subImageWidth, (cameraIndex+1)*subImageWidth));
+
+									int x = pointToPixel[i].second.x * (float)subImage.cols;
+									int y = pointToPixel[i].second.y * (float)subImage.rows;
+									UASSERT(x>=0 && x<subImage.cols);
+									UASSERT(y>=0 && y<subImage.rows);
+
+									if(subImage.type()==CV_8UC3)
+									{
+										cv::Vec3b bgr = subImage.at<cv::Vec3b>(y, x);
+										pt.b = bgr[0];
+										pt.g = bgr[1];
+										pt.r = bgr[2];
+									}
+									else
+									{
+										UASSERT(subImage.type()==CV_8UC1);
+										pt.r = pt.g = pt.b = subImage.at<unsigned char>(pointToPixel[i].second.y * subImage.rows, pointToPixel[i].second.x * subImage.cols);
+									}
 								}
 							}
 						}
+						QString msg = tr("Processed %1/%2 images").arg(imagesDone++).arg(cameraPoses.size());
+						UINFO(msg.toStdString().c_str());
+						_progressDialog->appendText(msg);
+					}
+				}
 
+				pcl::IndicesPtr validIndices(new std::vector<int>(pointToPixel.size()));
+				size_t oi = 0;
+				for(size_t i=0; i<pointToPixel.size(); ++i)
+				{
+					pcl::PointXYZRGBNormal & pt = assembledCloud->at(i);
+					if(pointToPixel[i].first.first <=0)
+					{
+						if(_ui->checkBox_camProjRecolorPoints->isChecked() && !_ui->checkBox_fromDepth->isChecked())
+						{
+							pt.r = 255;
+							pt.g = 0;
+							pt.b = 0;
+							pt.a = 255;
+						}
+					}
+					else
+					{
+						int nodeID = pointToPixel[i].first.first;
+						int cameraIndex = pointToPixel[i].first.second;
 						int exportedId = nodeID;
 						if(_ui->comboBox_camProjExportCamera->currentIndex() == 2)
 						{
@@ -4476,6 +4496,7 @@ void ExportCloudsDialog::saveTextureMeshes(
 								_dbDriver,
 								textureSize,
 								_ui->spinBox_multiband_downscale->value(),
+								_ui->lineEdit_multiband_nbcontrib->text().toStdString(),
 								_ui->comboBox_meshingTextureFormat->currentText().toStdString(),
 								gains,
 								blendingGains,
