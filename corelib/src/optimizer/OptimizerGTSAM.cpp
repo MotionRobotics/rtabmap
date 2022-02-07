@@ -55,10 +55,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "gtsam/GPSPose3XYZFactor.h"
 
 #ifdef RTABMAP_VERTIGO
-#include "vertigo/gtsam/betweenFactorMaxMix.h"
 #include "vertigo/gtsam/betweenFactorSwitchable.h"
 #include "vertigo/gtsam/switchVariableLinear.h"
-#include "vertigo/gtsam/switchVariableSigmoid.h"
 #endif
 #endif // end RTABMAP_GTSAM
 
@@ -107,22 +105,34 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 
 		// detect if there is a global pose prior set, if so remove rootId
 		bool hasGPSPrior = false;
-		if(!priorsIgnored())
+		bool hasGravityConstraints = false;
+		if(!priorsIgnored() || (!isSlam2d() && gravitySigma() > 0))
 		{
 			for(std::multimap<int, Link>::const_iterator iter=edgeConstraints.begin(); iter!=edgeConstraints.end(); ++iter)
 			{
-				if(iter->second.from() == iter->second.to() && iter->second.type() == Link::kPosePrior)
+				if(iter->second.from() == iter->second.to())
 				{
-					hasGPSPrior = true;
-					if ((isSlam2d() && 1 / static_cast<double>(iter->second.infMatrix().at<double>(5,5)) < 9999) ||
-						(1 / static_cast<double>(iter->second.infMatrix().at<double>(3,3)) < 9999.0 &&
-						 1 / static_cast<double>(iter->second.infMatrix().at<double>(4,4)) < 9999.0 &&
-						 1 / static_cast<double>(iter->second.infMatrix().at<double>(5,5)) < 9999.0))
+					if(!priorsIgnored() && iter->second.type() == Link::kPosePrior)
 					{
-						// orientation is set, don't set root prior (it is no GPS)
-						rootId = 0;
-						hasGPSPrior = false;
-						break;
+						hasGPSPrior = true;
+						if ((isSlam2d() && 1 / static_cast<double>(iter->second.infMatrix().at<double>(5,5)) < 9999) ||
+							(1 / static_cast<double>(iter->second.infMatrix().at<double>(3,3)) < 9999.0 &&
+							 1 / static_cast<double>(iter->second.infMatrix().at<double>(4,4)) < 9999.0 &&
+							 1 / static_cast<double>(iter->second.infMatrix().at<double>(5,5)) < 9999.0))
+						{
+							// orientation is set, don't set root prior (it is no GPS)
+							rootId = 0;
+							hasGPSPrior = false;
+							break;
+						}
+					}
+					if(iter->second.type() == Link::kGravity)
+					{
+						hasGravityConstraints = true;
+						if(priorsIgnored())
+						{
+							break;
+						}
 					}
 				}
 			}
@@ -143,7 +153,7 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 			{
 				gtsam::noiseModel::Diagonal::shared_ptr priorNoise = gtsam::noiseModel::Diagonal::Variances(
 						(gtsam::Vector(6) <<
-								1e-2, 1e-2, hasGPSPrior?1e-2:std::numeric_limits<double>::min(), // roll, pitch, fixed yaw if there are no priors
+								(hasGravityConstraints?2:1e-2), (hasGravityConstraints?2:1e-2), hasGPSPrior?1e-2:std::numeric_limits<double>::min(), // roll, pitch, fixed yaw if there are no priors
 								(hasGPSPrior?2:1e-2), hasGPSPrior?2:1e-2, hasGPSPrior?2:1e-2 // xyz
 								).finished());
 				graph.add(gtsam::PriorFactor<gtsam::Pose3>(rootId, gtsam::Pose3(initialPose.toEigen4d()), priorNoise));
@@ -613,8 +623,9 @@ std::map<int, Transform> OptimizerGTSAM::optimize(
 				{
 					if(key > 0)
 					{
+						poses.at(key).getTranslationAndEulerAngles(x,y,z,roll,pitch,yaw);
 						gtsam::Pose2 p = iter->value.cast<gtsam::Pose2>();
-						optimizedPoses.insert(std::make_pair(key, Transform(p.x(), p.y(), p.theta())));
+						optimizedPoses.insert(std::make_pair(key, Transform(p.x(), p.y(), z, roll, pitch, p.theta())));
 					}
 					else if(!landmarksIgnored() && isLandmarkWithRotation.find(key)!=isLandmarkWithRotation.end())
 					{
